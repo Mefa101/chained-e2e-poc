@@ -1,0 +1,9 @@
+{
+  "name": "chained-e2e-poc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Baseline main-branch package.json for the chained-E2E POC. This is what runs on main / workflow_dispatch -- benign, no secret access attempted.",
+  "scripts": {
+    "test": "echo 'main branch test script: nothing to see here, this is the trusted baseline'"
+  }
+}

@@ -1,0 +1,112 @@
+# POC replica of google-gemini/gemini-cli's chained_e2e.yml
+# Deploy this on the MAIN branch of a repo YOU OWN, alongside
+# trigger_e2e_poc.yml.
+#
+# Faithfulness to the real workflow: the real chained_e2e.yml checks out
+# the PR's repo/sha, then runs `npm run test:integration:sandbox:none`
+# (etc.) with GEMINI_API_KEY in env. That "test:integration" script is
+# DEFINED BY THE CHECKED-OUT CODE ITSELF (package.json on the PR branch),
+# so a fork PR fully controls what code executes while the secret is
+# present -- it's not just "a later step can read it," it's "attacker code
+# runs with it." This v2 replica reproduces that exactly: it runs `npm
+# test`, and the `test` script comes from whatever package.json is on the
+# checked-out ref -- i.e. from the fork PR branch, not from this repo's
+# main branch.
+#
+# DUMMY_SECRET is a throwaway value you set yourself. Never a real
+# credential. The attacker-controlled script only prints a length + hash
+# to this run's own log -- it does not exfiltrate anywhere off-platform.
+name: 'Testing: E2E Chained (POC)'
+
+on:
+  workflow_run:
+    workflows: ['Trigger E2E (POC)']
+    types: ['completed']
+  workflow_dispatch:
+
+jobs:
+  download_repo_name:
+    runs-on: 'ubuntu-latest'
+    if: "github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run'"
+    outputs:
+      repo_name: '${{ steps.output-repo-name.outputs.repo_name }}'
+      head_sha: '${{ steps.output-repo-name.outputs.head_sha }}'
+    steps:
+      - name: 'Download the repo_name artifact'
+        uses: 'actions/download-artifact@v5'
+        env:
+          RUN_ID: "${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || github.run_id }}"
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          name: 'repo_name'
+          run-id: '${{ env.RUN_ID }}'
+          path: '${{ runner.temp }}/artifacts'
+      - name: 'Output Repo Name and SHA'
+        id: 'output-repo-name'
+        uses: 'actions/github-script@v8'
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const temp = '${{ runner.temp }}/artifacts';
+            const repoPath = path.join(temp, 'repo_name');
+            if (fs.existsSync(repoPath)) {
+              core.setOutput('repo_name', String(fs.readFileSync(repoPath)).trim());
+            }
+            const shaPath = path.join(temp, 'head_sha');
+            if (fs.existsSync(shaPath)) {
+              core.setOutput('head_sha', String(fs.readFileSync(shaPath)).trim());
+            }
+
+  parse_run_context:
+    runs-on: 'ubuntu-latest'
+    needs: 'download_repo_name'
+    if: 'always()'
+    outputs:
+      repository: '${{ steps.set_context.outputs.REPO }}'
+      sha: '${{ steps.set_context.outputs.SHA }}'
+    steps:
+      - id: 'set_context'
+        env:
+          REPO: '${{ needs.download_repo_name.outputs.repo_name || github.repository }}'
+          SHA: '${{ needs.download_repo_name.outputs.head_sha || github.sha }}'
+        shell: 'bash'
+        run: |
+          echo "REPO=$REPO" >> "$GITHUB_OUTPUT"
+          echo "SHA=$SHA" >> "$GITHUB_OUTPUT"
+
+  e2e_poc:
+    name: 'E2E Test (POC)'
+    needs: 'parse_run_context'
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Checkout (attacker-controlled repo/sha, same as real workflow)'
+        uses: 'actions/checkout@v5'
+        with:
+          ref: '${{ needs.parse_run_context.outputs.sha }}'
+          repository: '${{ needs.parse_run_context.outputs.repository }}'
+          persist-credentials: false
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '20.x'
+
+      - name: 'Install dependencies (same as real workflow: npm ci)'
+        run: 'npm ci'
+
+      # This is the faithful part: in the real workflow, this step runs
+      # `npm run test:integration:sandbox:none`, a script defined in the
+      # checked-out ref's own package.json. Here we run `npm test` for the
+      # same reason -- whatever is checked out (main branch vs. a fork PR
+      # branch) decides what code actually executes, while DUMMY_SECRET is
+      # present in env. This is the real exploit mechanism: fork-controlled
+      # code execution in the presence of a secret, not merely a later
+      # step reading an env var.
+      - name: 'Run tests (npm test -- script comes from the checked-out ref)'
+        env:
+          DUMMY_SECRET: '${{ secrets.DUMMY_SECRET }}'
+        run: |
+          echo "Checked out repo: ${{ needs.parse_run_context.outputs.repository }}"
+          echo "Checked out sha:  ${{ needs.parse_run_context.outputs.sha }}"
+          npm test
